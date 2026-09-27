@@ -142,6 +142,170 @@ textarea {
   text-decoration-thickness: 1px;
 }
 
+.diff-text.majority,
+.diff-text.changed.majority {
+  color: #0f7b45;
+  background: #effbf3;
+  border: 1px solid #b7ebc6;
+}
+
+.diff-text.singleton,
+.diff-text.changed.singleton {
+  color: #531dab;
+  background: #f5edff;
+  border: 1px solid #d9c7fa;
+}
+
+.diff-text.missing {
+  color: #a8071a;
+  background: #fff4f2;
+  border: 1px dashed #f9b4ab;
+}
+
+.diff-text.divergent {
+  color: #7d4e00;
+  background: #fff7e8;
+  border: 1px solid #ffd591;
+}
+
+.witness-cell {
+  display: grid;
+  gap: 6px;
+}
+
+.witness-head,
+.witness-actions,
+.detail-witness-title,
+.note-tags,
+.adjust-row {
+  display: flex;
+  align-items: center;
+}
+
+.witness-head {
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.witness-actions {
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.witness-text {
+  min-height: 62px;
+  font-size: 14px;
+}
+
+.witness-missing {
+  display: grid;
+  min-height: 105px;
+  gap: 7px;
+  place-items: center;
+  padding: 12px 8px;
+  color: #86909c;
+  font-size: 12px;
+  text-align: center;
+  border: 1px dashed #f9b4ab;
+  border-radius: 7px;
+  background: #fff7f6;
+}
+
+.pairing-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.decision-cell,
+.note-cell {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #4e5969;
+}
+
+.evidence-line {
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: #f2f3f5;
+}
+
+.singleton-line {
+  color: #531dab;
+  background: #f5edff;
+}
+
+.missing-line {
+  color: #a8071a;
+  background: #ffece8;
+}
+
+.adopted-line {
+  font-weight: 600;
+  color: #1d2129;
+}
+
+.note-source {
+  color: #86909c;
+}
+
+.note-tags {
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.mini-metric,
+.manual-flag {
+  color: #86909c;
+  font-size: 11px;
+}
+
+.manual-flag {
+  color: #165dff;
+}
+
+.adoption-radio {
+  display: grid;
+  gap: 9px;
+  width: 100%;
+}
+
+.final-text {
+  margin-top: 12px;
+}
+
+.final-label {
+  margin-bottom: 6px;
+  color: #86909c;
+  font-size: 12px;
+}
+
+.detail-witness {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.detail-witness-title {
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.adjust-row {
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #4e5969;
+}
+
+.adjust-row .arco-btn {
+  flex: 1;
+}
+
 .paragraph-label {
   margin-bottom: 4px;
   color: #86909c;

@@ -12,7 +12,7 @@ export const sampleTextB = `古之善為道者，微玅玄通，深不可識。�
 
 export const sampleTextC = `古代善于行道的人，精微通达，深邃得难以认识。正因为难以认识，只能勉强形容。
 小心啊，像冬天涉水过河；警觉啊，像提防四周的邻国。恭敬啊，像做客；散融啊，像冰将要消解。
-敦厚啊，像未经雕琢的原木；开阔啊，像山谷；浑厚啊，像浊水。
+敦厚啊，像未经雕琢的原木。开阔啊，像山谷。浑厚啊，像浊水。
 谁能使浊水安静下来，慢慢澄清？谁能在安定中发动，慢慢产生生机？持守此道的人，不求盈满。`;
 
 export const sampleVersions: VersionDocument[] = [
@@ -42,7 +42,7 @@ export function splitIntoUnits(text: string, versionId: string): TextUnit[] {
 
   paragraphs.forEach((paragraph, paragraphIndex) => {
     const sentences = paragraph
-      .split(/(?<=[。！？!?；;])/)
+      .split(/(?<=[。！？!?])/)
       .map((item) => item.trim())
       .filter(Boolean);
     const paragraphId = `${versionId}-p-${paragraphIndex + 1}`;

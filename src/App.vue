@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { statusLabel, useCollation } from './composables/useCollation';
-import type { AlignmentRow, DifferenceStatus } from './types';
+import { patternLabel, statusLabel, useCollation } from './composables/useCollation';
+import WitnessCell from './components/WitnessCell.vue';
+import type { AlignmentRow, DifferenceStatus, ReadingPattern, WitnessKey } from './types';
 
 const {
   versions,
-  leftVersionId,
-  rightVersionId,
+  baseVersionId,
+  referenceAId,
+  referenceBId,
   rows,
   rules,
   selectedRowId,
@@ -17,8 +19,14 @@ const {
   message,
   canUndo,
   canRedo,
+  canAlign,
+  baseVersion,
+  referenceAVersion,
+  referenceBVersion,
   selectedRow,
   differenceCount,
+  missingCount,
+  singletonCount,
   acceptedCount,
   unresolvedCount,
   runAlignment,
@@ -26,39 +34,64 @@ const {
   updateRow,
   shiftPairing,
   moveRow,
+  adoptReading,
+  confirmAdoption,
   acceptRows,
   acceptAll,
+  quickAccept,
   nextDifference,
   addVersion,
+  witnessName,
+  witnessShortName,
   undo,
   redo,
   exportMarkdown,
-  exportJson,
-  commit
+  exportJson
 } = useCollation();
 
 const importVisible = ref(false);
 const onlyDifferences = ref(false);
 const rowQuery = ref('');
+const filterMode = ref<'all' | 'singleton' | 'missing' | 'unaccepted'>('all');
 const noteDraft = ref('');
 const sourceDraft = ref('');
 const importForm = ref({ name: '', source: '', text: '' });
 const fileInput = ref<HTMLInputElement | null>(null);
 
 const columns = [
-  { title: '状态', dataIndex: 'status', slotName: 'status', width: 122, fixed: 'left' as const },
-  { title: '底本', dataIndex: 'left', slotName: 'left', width: 330 },
-  { title: '对准操作', dataIndex: 'align', slotName: 'align', width: 112, align: 'center' as const },
-  { title: '参校本', dataIndex: 'right', slotName: 'right', width: 330 },
-  { title: '校记 / 来源', dataIndex: 'note', slotName: 'note', width: 240 }
+  { title: '三家判断', dataIndex: 'status', slotName: 'status', width: 145, fixed: 'left' as const },
+  { title: '底本', dataIndex: 'base', slotName: 'base', width: 275 },
+  { title: '参校本一', dataIndex: 'referenceA', slotName: 'referenceA', width: 275 },
+  { title: '参校本二', dataIndex: 'referenceB', slotName: 'referenceB', width: 275 },
+  { title: '多数 / 定本 / 接受', dataIndex: 'decision', slotName: 'decision', width: 255 },
+  { title: '校记 / 来源 / 调序', dataIndex: 'note', slotName: 'note', width: 245 }
 ];
+
+const witnesses: WitnessKey[] = ['base', 'referenceA', 'referenceB'];
+
+const selectedAdoptionRequiresConfirmation = computed(() => {
+  if (!selectedRow.value?.adoptedSource) return false;
+  return (
+    selectedRow.value.singletonReaders.includes(selectedRow.value.adoptedSource) ||
+    selectedRow.value.pattern === 'divergent'
+  );
+});
 
 const filteredRows = computed(() => {
   const query = rowQuery.value.trim().toLocaleLowerCase();
   return rows.value.filter((row) => {
-    if (onlyDifferences.value && row.status === 'same') return false;
+    if (onlyDifferences.value && row.pattern === 'unanimous') return false;
+    if (filterMode.value === 'singleton' && row.singletonReaders.length === 0) return false;
+    if (filterMode.value === 'missing' && row.missingReaders.length === 0) return false;
+    if (filterMode.value === 'unaccepted' && row.accepted) return false;
     if (!query) return true;
-    return [row.left?.text, row.right?.text, row.note, row.source, statusLabel(row.status)]
+    return [
+      ...witnesses.map((key) => row[key]?.text),
+      row.note,
+      row.source,
+      statusLabel(row.status),
+      patternLabel(row.pattern)
+    ]
       .filter(Boolean)
       .some((value) => value!.toLocaleLowerCase().includes(query));
   });
@@ -90,6 +123,14 @@ function statusColor(status: DifferenceStatus) {
   }[status] as 'gray' | 'orange' | 'green' | 'red' | 'arcoblue';
 }
 
+function patternColor(pattern: ReadingPattern) {
+  return {
+    unanimous: 'gray',
+    majority: 'green',
+    divergent: 'purple'
+  }[pattern] as 'gray' | 'green' | 'purple';
+}
+
 function rowClass(record: AlignmentRow) {
   return record.id === selectedRowId.value ? 'row-active' : '';
 }
@@ -108,13 +149,34 @@ function onRowClick(record: Record<string, unknown>) {
   selectedRowId.value = row.id;
 }
 
+function handleShift(record: AlignmentRow, key: WitnessKey, direction: -1 | 1) {
+  shiftPairing(record.id, key, direction);
+}
+
+function chooseAdoption(source: unknown) {
+  if (!selectedRow.value || typeof source !== 'string') return;
+  const key = source as WitnessKey;
+  if (!selectedRow.value[key]) {
+    Message.warning('缺句版本不能作为定本依据');
+    return;
+  }
+  adoptReading(selectedRow.value.id, key);
+  if (selectedAdoptionRequiresConfirmation.value) Message.warning('该定本读法未获多数支持，请人工复核后确认');
+}
+
 function saveAnnotation() {
   if (!selectedRow.value) return;
   updateRow(selectedRow.value.id, {
     note: noteDraft.value.trim(),
     source: sourceDraft.value.trim()
   });
-  Message.success('校勘说明已保存');
+  Message.success('校勘说明及三份依据已保存');
+}
+
+function acceptSelected() {
+  if (!selectedRowIds.value.length) return;
+  const skipped = acceptRows(selectedRowIds.value.map(String));
+  if (skipped > 0) Message.warning(`${skipped} 条孤例、三家互异或未定读法已跳过，请人工确认`);
 }
 
 function download(filename: string, text: string, type: string) {
@@ -128,9 +190,9 @@ function download(filename: string, text: string, type: string) {
 
 function handleExport(kind: 'markdown' | 'json') {
   if (kind === 'markdown') {
-    download('校勘记.md', exportMarkdown(), 'text/markdown;charset=utf-8');
+    download('三家校勘记.md', exportMarkdown(), 'text/markdown;charset=utf-8');
   } else {
-    download('校勘数据.json', exportJson(), 'application/json;charset=utf-8');
+    download('三家校勘数据.json', exportJson(), 'application/json;charset=utf-8');
   }
 }
 
@@ -199,13 +261,13 @@ window.addEventListener('beforeunload', beforeUnload);
       <div style="display: flex; align-items: center; gap: 12px; width: 100%">
         <div class="brand-mark">校</div>
         <div>
-          <h1 class="brand-title">校异斋 · 多版本校勘台</h1>
-          <div class="brand-subtitle">自动对齐、人工修正、校记导出，全程本地保存</div>
+          <h1 class="brand-title">校异斋 · 三家会校台</h1>
+          <div class="brand-subtitle">底本与两份参校本同条对齐，保留三份原文并追踪定本依据</div>
         </div>
         <a-space style="margin-left: auto" wrap>
           <a-button :disabled="!canUndo" @click="undo">撤销</a-button>
           <a-button :disabled="!canRedo" @click="redo">重做</a-button>
-          <a-button type="primary" :loading="processing" @click="runAlignment()">重新自动对齐</a-button>
+          <a-button type="primary" :loading="processing" :disabled="!canAlign" @click="runAlignment()">重新三家对齐</a-button>
           <a-button @click="openImport">导入版本</a-button>
           <a-dropdown>
             <a-button>导出校勘记</a-button>
@@ -219,34 +281,54 @@ window.addEventListener('beforeunload', beforeUnload);
     </a-layout-header>
 
     <a-layout class="main-layout">
-      <a-layout-sider class="left-panel" :width="282">
+      <a-layout-sider class="left-panel" :width="300">
         <section class="panel-section">
-          <h2 class="panel-title">比对版本</h2>
+          <h2 class="panel-title">会同三本</h2>
           <div style="display: grid; gap: 10px">
-            <a-select v-model="leftVersionId" aria-label="底本">
+            <a-select v-model="baseVersionId" aria-label="底本">
               <template #prefix>底本</template>
-              <a-option v-for="version in versions" :key="version.id" :value="version.id">{{ version.name }}</a-option>
+              <a-option v-for="version in versions" :key="version.id" :value="version.id" :disabled="version.id === referenceAId || version.id === referenceBId">
+                {{ version.name }}
+              </a-option>
             </a-select>
-            <a-select v-model="rightVersionId" aria-label="参校本">
-              <template #prefix>参校</template>
-              <a-option v-for="version in versions" :key="version.id" :value="version.id">{{ version.name }}</a-option>
+            <a-select v-model="referenceAId" aria-label="参校本一">
+              <template #prefix>参一</template>
+              <a-option v-for="version in versions" :key="version.id" :value="version.id" :disabled="version.id === baseVersionId || version.id === referenceBId">
+                {{ version.name }}
+              </a-option>
             </a-select>
-            <a-button long type="outline" @click="runAlignment()">执行分片自动对齐</a-button>
+            <a-select v-model="referenceBId" aria-label="参校本二">
+              <template #prefix>参二</template>
+              <a-option v-for="version in versions" :key="version.id" :value="version.id" :disabled="version.id === baseVersionId || version.id === referenceAId">
+                {{ version.name }}
+              </a-option>
+            </a-select>
+            <a-button long type="outline" :disabled="!canAlign" @click="runAlignment()">执行分片自动对齐</a-button>
           </div>
           <a-progress v-if="processing" :percent="progress" size="small" style="margin-top: 12px" />
           <div v-if="processing" style="margin-top: 6px; color: #86909c; font-size: 12px">
-            正在让出主线程，长文本编辑不会一直卡住
+            两组配对并行分片计算，长文本不会长时间卡死
           </div>
         </section>
 
         <section class="panel-section">
           <h2 class="panel-title">比较规则</h2>
           <a-space direction="vertical" fill>
-            <a-checkbox v-model="rules.ignorePunctuation" @change="recalculate">忽略标点差异</a-checkbox>
-            <a-checkbox v-model="rules.ignoreVariants" @change="recalculate">忽略常见异体字</a-checkbox>
+            <a-checkbox
+              :model-checked="rules.ignorePunctuation"
+              @change="(checked) => { rules.ignorePunctuation = Boolean(checked); recalculate(); }"
+            >
+              忽略标点差异
+            </a-checkbox>
+            <a-checkbox
+              :model-checked="rules.ignoreVariants"
+              @change="(checked) => { rules.ignoreVariants = Boolean(checked); recalculate(); }"
+            >
+              忽略常见异体字
+            </a-checkbox>
           </a-space>
           <div style="margin-top: 10px; color: #86909c; font-size: 12px; line-height: 1.6">
-            规则只影响相同/改动判断，原始正文始终保留；重算会进入撤销历史。
+            规则只影响多数、孤例与错位判断，三份原文始终保留；重算进入撤销历史。
           </div>
         </section>
 
@@ -255,11 +337,19 @@ window.addEventListener('beforeunload', beforeUnload);
           <div class="stats-grid">
             <div class="stat-card">
               <div class="stat-number">{{ differenceCount }}</div>
-              <div class="stat-label">全部差异</div>
+              <div class="stat-label">非一致读法</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-number" style="color: #722ed1">{{ singletonCount }}</div>
+              <div class="stat-label">孤例待确认</div>
             </div>
             <div class="stat-card">
               <div class="stat-number" style="color: #d25f00">{{ unresolvedCount }}</div>
               <div class="stat-label">待校勘</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-number" style="color: #f53f3f">{{ missingCount }}</div>
+              <div class="stat-label">缺句</div>
             </div>
             <div class="stat-card">
               <div class="stat-number" style="color: #00875a">{{ acceptedCount }}</div>
@@ -271,15 +361,15 @@ window.addEventListener('beforeunload', beforeUnload);
             </div>
           </div>
           <a-button long type="primary" status="success" style="margin-top: 12px" :disabled="!unresolvedCount" @click="acceptAll">
-            批量接受全部建议
+            接受多数建议
           </a-button>
-          <a-button long style="margin-top: 8px" @click="nextDifference">跳到下一处未接受差异</a-button>
+          <a-button long style="margin-top: 8px" @click="nextDifference">跳到下一处未接受读法</a-button>
         </section>
 
         <section class="panel-section">
           <h2 class="panel-title">键盘辅助</h2>
           <div style="color: #4e5969; font-size: 12px; line-height: 2">
-            <div><a-tag size="small">Alt ↓</a-tag> 下一处差异</div>
+            <div><a-tag size="small">Alt ↓</a-tag> 下一处读法</div>
             <div><a-tag size="small">A</a-tag> 接受勾选建议</div>
             <div><a-tag size="small">Ctrl/⌘ Z</a-tag> 撤销</div>
             <div><a-tag size="small">Ctrl/⌘ Y</a-tag> 重做</div>
@@ -290,26 +380,32 @@ window.addEventListener('beforeunload', beforeUnload);
       <a-layout-content class="center-panel">
         <a-card :bordered="false" style="margin-bottom: 12px">
           <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
-            <a-input-search v-model="rowQuery" placeholder="搜索正文、校记或来源" allow-clear style="max-width: 360px" />
-            <a-checkbox v-model="onlyDifferences">只看差异</a-checkbox>
+            <a-input-search v-model="rowQuery" placeholder="搜索三份原文、校记或来源" allow-clear style="max-width: 340px" />
+            <a-select v-model="filterMode" style="width: 150px" aria-label="筛选读法">
+              <a-option value="all">全部记录</a-option>
+              <a-option value="unaccepted">未接受</a-option>
+              <a-option value="singleton">仅孤例</a-option>
+              <a-option value="missing">仅缺句</a-option>
+            </a-select>
+            <a-checkbox v-model="onlyDifferences">隐藏三家一致</a-checkbox>
             <a-tag color="arcoblue">{{ filteredRows.length }} / {{ rows.length }} 行</a-tag>
-            <a-tag v-if="selectedRowIds.length" color="green">{{ selectedRowIds.length }} 行已勾选</a-tag>
+            <a-tag v-if="singletonCount" color="purple">{{ singletonCount }} 条孤例需人工确认</a-tag>
             <a-button
               v-if="selectedRowIds.length"
               type="primary"
               status="success"
               size="small"
               style="margin-left: auto"
-              @click="acceptRows(selectedRowIds.map(String))"
+              @click="acceptSelected"
             >
-              接受勾选建议
+              接受勾选（孤例跳过）
             </a-button>
           </div>
         </a-card>
 
         <a-card :bordered="false" :body-style="{ padding: 0 }">
           <a-alert :show-icon="processing" :type="unresolvedCount ? 'warning' : 'success'" style="border-radius: 0">
-            {{ message }}<span v-if="unresolvedCount"> · {{ unresolvedCount }} 条差异尚未接受</span>
+            {{ message }}<span v-if="unresolvedCount"> · {{ unresolvedCount }} 条读法尚未接受</span>
           </a-alert>
           <a-table
             class="virtual-table"
@@ -319,143 +415,197 @@ window.addEventListener('beforeunload', beforeUnload);
             :pagination="false"
             :row-selection="rowSelection"
             :row-class="rowClass"
-            :scroll="{ x: 1160, y: 'calc(100vh - 260px)' }"
+            :scroll="{ x: 1540, y: 'calc(100vh - 260px)' }"
             :virtual-list-props="{ height: 590, threshold: 40 }"
             @selection-change="onSelectionChange"
             @row-click="onRowClick"
           >
             <template #status="{ record }">
-              <a-tag :color="statusColor(record.status)">
-                {{ statusLabel(record.status) }}
-              </a-tag>
-              <div style="margin-top: 6px; color: #86909c; font-size: 11px">
-                相似度 {{ Math.round(record.similarity * 100) }}%
-              </div>
-              <div v-if="record.manuallyAdjusted" style="margin-top: 4px; color: #165dff; font-size: 11px">人工调整</div>
-            </template>
-
-            <template #left="{ record }">
-              <div v-if="record.left">
-                <div class="paragraph-label">段 {{ record.left.paragraphOrder }} · 句 {{ record.left.sentenceOrder }}</div>
-                <div class="diff-text" :class="record.status === 'removed' ? 'removed' : record.status === 'changed' || record.status === 'misaligned' ? 'changed' : 'same'">
-                  {{ record.left.text }}
-                </div>
-              </div>
-              <div v-else style="padding: 20px 8px; color: #86909c; text-align: center">无对应底本句</div>
-            </template>
-
-            <template #align="{ record }">
               <a-space direction="vertical" size="mini">
-                <a-button size="mini" @click.stop="shiftPairing(record.id, -1)">配对上移</a-button>
-                <a-button size="mini" @click.stop="shiftPairing(record.id, 1)">配对下移</a-button>
-                <a-button size="mini" @click.stop="moveRow(record.id, -1)">整行上移</a-button>
-                <a-button size="mini" @click.stop="moveRow(record.id, 1)">整行下移</a-button>
-                <a-tooltip content="接受这一行的自动判断">
-                  <a-button size="mini" status="success" @click.stop="acceptRows([record.id])">接受</a-button>
-                </a-tooltip>
+                <a-tag :color="statusColor(record.status)">{{ statusLabel(record.status) }}</a-tag>
+                <a-tag :color="patternColor(record.pattern)">{{ patternLabel(record.pattern) }}</a-tag>
+                <div class="mini-metric">平均相似度 {{ Math.round(record.similarity * 100) }}%</div>
+                <div v-if="record.manuallyAdjusted" class="manual-flag">人工调整</div>
               </a-space>
             </template>
 
-            <template #right="{ record }">
-              <div v-if="record.right">
-                <div class="paragraph-label">段 {{ record.right.paragraphOrder }} · 句 {{ record.right.sentenceOrder }}</div>
-                <div class="diff-text" :class="record.status === 'added' ? 'added' : record.status === 'changed' || record.status === 'misaligned' ? 'changed' : 'same'">
-                  {{ record.right.text }}
+            <template #base="{ record }">
+              <witness-cell :row="record" witness="base" :short-name="witnessShortName('base')" @shift="(key, direction) => handleShift(record, key, direction)" />
+            </template>
+            <template #referenceA="{ record }">
+              <witness-cell :row="record" witness="referenceA" :short-name="witnessShortName('referenceA')" @shift="(key, direction) => handleShift(record, key, direction)" />
+            </template>
+            <template #referenceB="{ record }">
+              <witness-cell :row="record" witness="referenceB" :short-name="witnessShortName('referenceB')" @shift="(key, direction) => handleShift(record, key, direction)" />
+            </template>
+
+            <template #decision="{ record }">
+              <div class="decision-cell">
+                <div v-if="record.majorityReaders.length" class="evidence-line">
+                  多数：{{ record.majorityReaders.map(witnessShortName).join('、') }}
                 </div>
+                <div v-if="record.singletonReaders.length" class="evidence-line singleton-line">
+                  孤例：{{ record.singletonReaders.map(witnessShortName).join('、') }}
+                </div>
+                <div v-if="record.missingReaders.length" class="evidence-line missing-line">
+                  缺句：{{ record.missingReaders.map(witnessShortName).join('、') }}
+                </div>
+                <div v-if="!record.majorityReaders.length && !record.missingReaders.length" class="evidence-line">
+                  三家互异，无多数读法
+                </div>
+                <div class="adopted-line">
+                  定本：{{ record.adoptedSource ? witnessShortName(record.adoptedSource) : '未指定' }}
+                </div>
+                <a-button size="mini" type="primary" status="success" :disabled="record.accepted" @click.stop="quickAccept(record)">
+                  {{ record.accepted ? '已接受' : '接受建议' }}
+                </a-button>
               </div>
-              <div v-else style="padding: 20px 8px; color: #86909c; text-align: center">无对应参校本句</div>
             </template>
 
             <template #note="{ record }">
-              <div style="font-size: 12px; line-height: 1.6; color: #4e5969">
+              <div class="note-cell">
                 <div>{{ record.note || '尚未填写校勘说明' }}</div>
-                <div v-if="record.source" style="margin-top: 5px; color: #86909c">来源：{{ record.source }}</div>
-                <a-tag v-if="record.accepted" size="small" color="green" style="margin-top: 7px">已接受</a-tag>
-                <a-tag v-else size="small" color="orange" style="margin-top: 7px">待处理</a-tag>
+                <div v-if="record.source" class="note-source">来源：{{ record.source }}</div>
+                <div class="note-tags">
+                  <a-tag size="small" :color="record.accepted ? 'green' : 'orange'">
+                    {{ record.accepted ? (record.manuallyConfirmed ? '已确认' : '已接受') : '待处理' }}
+                  </a-tag>
+                  <a-button size="mini" @click.stop="moveRow(record.id, -1)">行上移</a-button>
+                  <a-button size="mini" @click.stop="moveRow(record.id, 1)">行下移</a-button>
+                </div>
               </div>
             </template>
 
             <template #empty>
-              <a-empty description="没有符合条件的对齐行" />
+              <a-empty description="没有符合条件的三家对齐行" />
             </template>
           </a-table>
         </a-card>
       </a-layout-content>
 
-      <a-layout-sider class="right-panel" :width="340">
+      <a-layout-sider class="right-panel" :width="380">
         <section class="panel-section">
           <div style="display: flex; align-items: center">
             <h2 class="panel-title" style="margin: 0">校勘详情</h2>
-            <a-tag v-if="selectedRow" color="arcoblue" style="margin-left: auto">{{ statusLabel(selectedRow.status) }}</a-tag>
+            <a-space v-if="selectedRow" size="mini" style="margin-left: auto">
+              <a-tag size="small" :color="statusColor(selectedRow.status)">{{ statusLabel(selectedRow.status) }}</a-tag>
+              <a-tag size="small" :color="patternColor(selectedRow.pattern)">{{ patternLabel(selectedRow.pattern) }}</a-tag>
+            </a-space>
           </div>
         </section>
 
         <template v-if="selectedRow">
           <section class="panel-section">
+            <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">指定定本采用哪一家</div>
+            <a-radio-group
+              class="adoption-radio"
+              direction="vertical"
+              :model-value="selectedRow.adoptedSource"
+              @change="chooseAdoption"
+            >
+              <a-radio v-for="key in witnesses" :key="key" :value="key" :disabled="!selectedRow[key]">
+                {{ witnessName(key) }}
+                <a-tag
+                  size="small"
+                  :color="selectedRow.majorityReaders.includes(key) ? 'green' : selectedRow.singletonReaders.includes(key) ? 'purple' : selectedRow.missingReaders.includes(key) ? 'red' : 'orange'"
+                >
+                  {{ selectedRow.majorityReaders.includes(key) ? '多数' : selectedRow.singletonReaders.includes(key) ? '孤例' : selectedRow.missingReaders.includes(key) ? '缺句' : '互异' }}
+                </a-tag>
+              </a-radio>
+            </a-radio-group>
+            <div v-if="selectedRow.adoptedText" class="final-text">
+              <div class="final-label">定本正文</div>
+              <div
+                class="diff-text"
+                :class="selectedAdoptionRequiresConfirmation ? 'singleton' : 'majority'"
+              >
+                {{ selectedRow.adoptedText }}
+              </div>
+            </div>
+            <a-alert
+              v-if="selectedAdoptionRequiresConfirmation && !selectedRow.accepted"
+              type="warning"
+              style="margin-top: 10px"
+            >
+              定本采用孤例或三家互异读法，必须人工复核后确认。
+            </a-alert>
+            <a-button
+              long
+              type="primary"
+              style="margin-top: 10px"
+              :status="selectedRow.accepted ? 'normal' : 'success'"
+              :disabled="!selectedRow.adoptedSource"
+              @click="confirmAdoption(selectedRow.id, !selectedRow.accepted)"
+            >
+              {{ selectedRow.accepted ? '撤回接受状态' : '人工确认接受定本' }}
+            </a-button>
+          </section>
+
+          <section class="panel-section">
+            <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">三份原文依据</div>
+            <div v-for="key in witnesses" :key="key" class="detail-witness">
+              <div class="detail-witness-title">
+                <strong>{{ witnessName(key) }}</strong>
+                <a-tag
+                  size="small"
+                  :color="selectedRow.majorityReaders.includes(key) ? 'green' : selectedRow.singletonReaders.includes(key) ? 'purple' : selectedRow.missingReaders.includes(key) ? 'red' : 'gray'"
+                >
+                  {{ selectedRow.majorityReaders.includes(key) ? '多数一致' : selectedRow.singletonReaders.includes(key) ? '仅一家不同' : selectedRow.missingReaders.includes(key) ? '缺句' : '三家互异' }}
+                </a-tag>
+              </div>
+              <div class="diff-text" :class="selectedRow.majorityReaders.includes(key) ? 'majority' : selectedRow.singletonReaders.includes(key) ? 'singleton' : selectedRow.missingReaders.includes(key) ? 'missing' : 'divergent'">
+                {{ selectedRow[key]?.text || '（此本缺句）' }}
+              </div>
+            </div>
+          </section>
+
+          <section class="panel-section">
             <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">判断类别</div>
             <a-select :model-value="selectedRow.status" style="width: 100%" @change="updateStatus">
-              <a-option value="same">相同</a-option>
-              <a-option value="changed">改动</a-option>
-              <a-option value="added">右侧新增</a-option>
-              <a-option value="removed">左侧删减</a-option>
+              <a-option value="same">三家相同</a-option>
+              <a-option value="changed">异文</a-option>
+              <a-option value="added">底本缺句</a-option>
+              <a-option value="removed">参校缺句</a-option>
               <a-option value="misaligned">疑错位</a-option>
             </a-select>
           </section>
 
           <section class="panel-section">
-            <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">底本 / 参校本</div>
-            <div class="diff-text same">{{ selectedRow.left?.text || '（无）' }}</div>
-            <div style="height: 8px" />
-            <div class="diff-text changed">{{ selectedRow.right?.text || '（无）' }}</div>
-          </section>
-
-          <section class="panel-section">
-            <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">校勘说明</div>
+            <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">校勘说明与来源依据</div>
             <a-textarea
               v-model="noteDraft"
-              placeholder="记录字形、词句、标点或语义差异的判断依据"
-              :auto-size="{ minRows: 5, maxRows: 10 }"
+              placeholder="记录字形、词句、标点、缺句或多数/孤例判断依据"
+              :auto-size="{ minRows: 4, maxRows: 9 }"
             />
-            <a-input v-model="sourceDraft" placeholder="来源，如：某刻本、某整理者" style="margin-top: 10px" />
+            <a-input v-model="sourceDraft" placeholder="来源，如：某刻本、出土本、整理者" style="margin-top: 10px" />
             <a-button long type="primary" style="margin-top: 10px" @click="saveAnnotation">保存校勘说明</a-button>
           </section>
 
           <section class="panel-section">
-            <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">错位修正</div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px">
-              <a-button @click="shiftPairing(selectedRow.id, -1)">配对向前</a-button>
-              <a-button @click="shiftPairing(selectedRow.id, 1)">配对向后</a-button>
-              <a-button @click="moveRow(selectedRow.id, -1)">整行上移</a-button>
-              <a-button @click="moveRow(selectedRow.id, 1)">整行下移</a-button>
+            <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">人工调序（仅移动该本配对，不改原文）</div>
+            <div v-for="key in witnesses" :key="key" class="adjust-row">
+              <span>{{ witnessShortName(key) }}</span>
+              <a-button size="mini" @click="shiftPairing(selectedRow.id, key, -1)">配对向前</a-button>
+              <a-button size="mini" @click="shiftPairing(selectedRow.id, key, 1)">配对向后</a-button>
             </div>
-            <a-alert type="info" style="margin-top: 10px" :show-icon="true">
-              配对移动只交换左栏句段，不会改写底本或参校本原文。
-            </a-alert>
-          </section>
-
-          <section class="panel-section">
-            <a-button
-              long
-              :status="selectedRow.accepted ? 'normal' : 'success'"
-              :type="selectedRow.accepted ? 'outline' : 'primary'"
-              @click="updateRow(selectedRow.id, { accepted: !selectedRow.accepted })"
-            >
-              {{ selectedRow.accepted ? '撤回接受状态' : '接受这条校勘建议' }}
-            </a-button>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px">
+              <a-button @click="moveRow(selectedRow.id, -1)">整条上移</a-button>
+              <a-button @click="moveRow(selectedRow.id, 1)">整条下移</a-button>
+            </div>
           </section>
         </template>
 
         <div v-else class="inspector-empty">
           <div>
             <div style="font-size: 30px; color: #c9cdd4">择</div>
-            <p>选择中间表格的一行<br />即可调整错位并填写校勘说明</p>
+            <p>点选一条三家对齐记录<br />指定定本、确认孤例并补写校记</p>
           </div>
         </div>
 
         <section class="panel-section" style="margin-top: auto">
           <div style="color: #86909c; font-size: 11px; line-height: 1.7">
             最近状态：{{ message }}<br />
-            数据保存在当前浏览器，刷新后继续。
+            版本、规则、人工调序、接受状态和三份依据均保存在当前浏览器。
           </div>
         </section>
       </a-layout-sider>
@@ -482,11 +632,11 @@ window.addEventListener('beforeunload', beforeUnload);
       <a-form-item label="或直接粘贴正文">
         <a-textarea
           v-model="importForm.text"
-          placeholder="空行分段；句号、问号、感叹号或分号后自动分句"
+          placeholder="空行分段；句号、问号、感叹号后自动分句"
           :auto-size="{ minRows: 10, maxRows: 18 }"
         />
       </a-form-item>
-      <a-alert type="info" :show-icon="true">导入仅写入当前浏览器。对齐过程会分片执行，原文不会被自动改写。</a-alert>
+      <a-alert type="info" :show-icon="true">导入仅写入当前浏览器。对齐过程会分片执行，三份原文均不会被自动改写。</a-alert>
     </a-form>
   </a-modal>
 </template>

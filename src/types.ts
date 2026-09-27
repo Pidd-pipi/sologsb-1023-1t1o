@@ -1,4 +1,6 @@
 export type DifferenceStatus = 'same' | 'changed' | 'added' | 'removed' | 'misaligned';
+export type WitnessKey = 'base' | 'referenceA' | 'referenceB';
+export type ReadingPattern = 'unanimous' | 'majority' | 'divergent';
 
 export interface TextUnit {
   id: string;
@@ -18,16 +20,31 @@ export interface VersionDocument {
   units: TextUnit[];
 }
 
+export interface ThreeWaySimilarities {
+  baseReferenceA: number | null;
+  baseReferenceB: number | null;
+  referenceAReferenceB: number | null;
+}
+
 export interface AlignmentRow {
   id: string;
-  left?: TextUnit;
-  right?: TextUnit;
+  base?: TextUnit;
+  referenceA?: TextUnit;
+  referenceB?: TextUnit;
   status: DifferenceStatus;
+  pattern: ReadingPattern;
   similarity: number;
+  similarities: ThreeWaySimilarities;
+  majorityReaders: WitnessKey[];
+  singletonReaders: WitnessKey[];
+  missingReaders: WitnessKey[];
   note: string;
   source: string;
   accepted: boolean;
   manuallyAdjusted: boolean;
+  manuallyConfirmed: boolean;
+  adoptedSource?: WitnessKey;
+  adoptedText?: string;
 }
 
 export interface ComparisonRules {
@@ -38,8 +55,9 @@ export interface ComparisonRules {
 
 export interface PersistedCollationState {
   versions: VersionDocument[];
-  leftVersionId: string;
-  rightVersionId: string;
+  baseVersionId: string;
+  referenceAId: string;
+  referenceBId: string;
   rows: AlignmentRow[];
   rules: ComparisonRules;
   selectedRowId: string;
