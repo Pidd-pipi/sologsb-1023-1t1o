@@ -49,6 +49,7 @@ export function splitIntoUnits(text: string, versionId: string): TextUnit[] {
     (sentences.length ? sentences : [paragraph]).forEach((sentence) => {
       units.push({
         id: `${paragraphId}-s-${units.length + 1}`,
+        versionId,
         paragraphId,
         paragraphOrder: paragraphIndex + 1,
         sentenceOrder: sentenceOrder++,

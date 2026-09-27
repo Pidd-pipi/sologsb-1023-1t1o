@@ -5,11 +5,16 @@ import type {
   ComparisonRules,
   DifferenceStatus,
   PersistedCollationState,
+  ReadingPattern,
   TextUnit,
-  VersionDocument
+  VersionDocument,
+  WitnessKey,
+  WitnessVersionIds
 } from '../types';
 
-const STORAGE_KEY = 'sologsb-1023/multi-version-collation/v1';
+const STORAGE_KEY = 'sologsb-1023/multi-version-collation/v2';
+
+export const witnessKeys: WitnessKey[] = ['base', 'reference1', 'reference2'];
 
 const variantMap: Record<string, string> = {
   為: '为',
@@ -33,6 +38,8 @@ const variantMap: Record<string, string> = {
   說: '说',
   國: '国'
 };
+
+type WitnessSlots = Partial<Record<WitnessKey, TextUnit>>;
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -72,98 +79,273 @@ function similarity(left: string, right: string) {
   return previous[b.length] / Math.max(a.length, b.length);
 }
 
-function statusFor(left: TextUnit | undefined, right: TextUnit | undefined, ratio: number): DifferenceStatus {
-  if (!left) return 'added';
-  if (!right) return 'removed';
-  if (ratio > 0.995) return 'same';
-  if (ratio >= 0.38) return 'changed';
-  return 'misaligned';
+function pairSimilarity(left: TextUnit | undefined, right: TextUnit | undefined, rules: ComparisonRules) {
+  if (!left || !right) return undefined;
+  return Number(
+    similarity(normalized(left.text, rules), normalized(right.text, rules)).toFixed(3)
+  );
+}
+
+function witnessOf(row: AlignmentRow, key: WitnessKey) {
+  return row[key];
+}
+
+export function getWitnessUnit(row: AlignmentRow, key: WitnessKey) {
+  return witnessOf(row, key);
+}
+
+export function witnessEntries(row: AlignmentRow, versions: VersionDocument[]) {
+  return witnessKeys.map((key) => {
+    const versionId = row.witnessVersionIds[key];
+    return {
+      key,
+      versionId,
+      version: versions.find((item) => item.id === versionId),
+      unit: witnessOf(row, key)
+    };
+  });
+}
+
+export function versionName(versions: VersionDocument[], id: string | undefined) {
+  if (!id) return '未选择';
+  return versions.find((item) => item.id === id)?.name ?? id;
+}
+
+function makeWitnessVersionIds(baseId: string, reference1Id: string, reference2Id: string): WitnessVersionIds {
+  return { base: baseId, reference1: reference1Id, reference2: reference2Id };
+}
+
+export function readingRequiresReview(
+  pattern: ReadingPattern,
+  status: DifferenceStatus,
+  adoptedVersionId: string | undefined,
+  singletonVersionId?: string
+) {
+  return (
+    pattern === 'divergent' ||
+    pattern === 'incomplete' ||
+    status === 'misaligned' ||
+    (pattern === 'majority' && adoptedVersionId === singletonVersionId)
+  );
+}
+
+function analyzeRow(row: AlignmentRow, rules: ComparisonRules): AlignmentRow {
+  const units = [row.base, row.reference1, row.reference2].filter(Boolean) as TextUnit[];
+  const baseReference1 = pairSimilarity(row.base, row.reference1, rules);
+  const baseReference2 = pairSimilarity(row.base, row.reference2, rules);
+  const reference1Reference2 = pairSimilarity(row.reference1, row.reference2, rules);
+  const pairValues = [baseReference1, baseReference2, reference1Reference2].filter(
+    (value): value is number => value !== undefined
+  );
+  const averageSimilarity = pairValues.length
+    ? Number((pairValues.reduce((sum, value) => sum + value, 0) / pairValues.length).toFixed(3))
+    : 0;
+
+  const readings = new Map<string, string[]>();
+  units.forEach((unit) => {
+    const value = normalized(unit.text, rules);
+    readings.set(value, [...(readings.get(value) ?? []), unit.versionId]);
+  });
+
+  const presentVersionIds = units.map((unit) => unit.versionId);
+  const missingVersionIds = witnessKeys
+    .map((key) => row.witnessVersionIds[key])
+    .filter((id) => !presentVersionIds.includes(id));
+
+  let readingPattern: ReadingPattern;
+  let agreementVersionIds: string[] = [];
+  let singletonVersionId: string | undefined;
+
+  if (units.length < 3) {
+    readingPattern = 'incomplete';
+    if (units.length === 2 && readings.size === 1) agreementVersionIds = presentVersionIds;
+  } else if (readings.size === 1) {
+    readingPattern = 'unanimous';
+    agreementVersionIds = presentVersionIds;
+  } else {
+    const groups = Array.from(readings.values()).sort((a, b) => b.length - a.length || a[0].localeCompare(b[0]));
+    if (groups[0].length === 2) {
+      readingPattern = 'majority';
+      agreementVersionIds = groups[0];
+      singletonVersionId = groups[1][0];
+    } else {
+      readingPattern = 'divergent';
+    }
+  }
+
+  let status: DifferenceStatus;
+  if (units.length < 3) {
+    status = 'missing';
+  } else if (readingPattern === 'unanimous') {
+    status = 'same';
+  } else if (averageSimilarity < 0.38) {
+    status = 'misaligned';
+  } else {
+    status = 'changed';
+  }
+
+  let suggestedAdoption: string | undefined;
+  if (readingPattern === 'unanimous' || readingPattern === 'majority') {
+    suggestedAdoption = row.witnessVersionIds.base && agreementVersionIds.includes(row.witnessVersionIds.base)
+      ? row.witnessVersionIds.base
+      : agreementVersionIds[0];
+  } else if (units.length === 2) {
+    suggestedAdoption = row.base?.versionId ?? units[0].versionId;
+  } else if (units.length === 1) {
+    suggestedAdoption = units[0].versionId;
+  }
+
+  const requiresManualConfirmation = readingRequiresReview(
+    readingPattern,
+    status,
+    suggestedAdoption,
+    singletonVersionId
+  );
+
+  return {
+    ...row,
+    status,
+    readingPattern,
+    pairSimilarities: {
+      baseReference1,
+      baseReference2,
+      reference1Reference2
+    },
+    similarity: averageSimilarity,
+    agreementVersionIds,
+    singletonVersionId,
+    missingVersionIds,
+    adoptedVersionId: row.manualConfirmed ? row.adoptedVersionId : suggestedAdoption,
+    accepted: row.manualConfirmed
+      ? row.accepted && !requiresManualConfirmation
+      : !requiresManualConfirmation && Boolean(suggestedAdoption)
+  };
+}
+
+function buildRow(slots: WitnessSlots, rules: ComparisonRules, witnessVersionIds: WitnessVersionIds) {
+  const row: AlignmentRow = {
+    id: '',
+    base: slots.base,
+    reference1: slots.reference1,
+    reference2: slots.reference2,
+    witnessVersionIds,
+    status: 'changed',
+    readingPattern: 'divergent',
+    pairSimilarities: {},
+    similarity: 0,
+    agreementVersionIds: [],
+    missingVersionIds: [],
+    manualConfirmed: false,
+    note: '',
+    source: '',
+    accepted: false,
+    manuallyAdjusted: false
+  };
+  return analyzeRow(row, rules);
+}
+
+function candidateScore(slots: WitnessSlots, rules: ComparisonRules) {
+  const present = [slots.base, slots.reference1, slots.reference2].filter(Boolean) as TextUnit[];
+  if (!present.length) return -1;
+  if (present.length === 1) return present[0].paragraphOrder > 0 ? 0.1 : 0.08;
+
+  const values = [
+    pairSimilarity(slots.base, slots.reference1, rules),
+    pairSimilarity(slots.base, slots.reference2, rules),
+    pairSimilarity(slots.reference1, slots.reference2, rules)
+  ].filter((value): value is number => value !== undefined);
+  const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+
+  if (present.length === 3) {
+    const paragraphs = new Set(present.map((unit) => unit.paragraphOrder));
+    const sameParagraph = paragraphs.size === 1;
+    const [base, reference1, reference2] = present;
+    const sentenceIndexSpread = Math.max(
+      Math.abs(base.sentenceOrder - reference1.sentenceOrder),
+      Math.abs(base.sentenceOrder - reference2.sentenceOrder),
+      Math.abs(reference1.sentenceOrder - reference2.sentenceOrder)
+    );
+    const structuralMatch = sameParagraph && sentenceIndexSpread <= 1;
+    const gapPenalty = sameParagraph
+      ? 0
+      : Math.min(
+          0.16,
+          0.04 *
+            (Math.abs((slots.base?.paragraphOrder ?? 0) - (slots.reference1?.paragraphOrder ?? 0)) +
+              Math.abs((slots.base?.paragraphOrder ?? 0) - (slots.reference2?.paragraphOrder ?? 0)) +
+              Math.abs((slots.reference1?.paragraphOrder ?? 0) - (slots.reference2?.paragraphOrder ?? 0)))
+        );
+    const structuralScore = structuralMatch ? 0.82 + average * 0.08 : average;
+    return Number((structuralScore + (sameParagraph && !structuralMatch ? 0.1 : 0) - gapPenalty).toFixed(3));
+  }
+
+  const sameParagraph = present[0].paragraphOrder === present[1].paragraphOrder;
+  return Number((average + (sameParagraph ? 0.08 : -0.05)).toFixed(3));
 }
 
 async function alignUnits(
-  leftUnits: TextUnit[],
-  rightUnits: TextUnit[],
+  versionIds: WitnessVersionIds,
+  unitSets: Record<WitnessKey, TextUnit[]>,
   rules: ComparisonRules,
   onProgress: (value: number) => void
 ): Promise<AlignmentRow[]> {
   const rows: AlignmentRow[] = [];
-  let leftIndex = 0;
-  let rightIndex = 0;
+  const indexes: Record<WitnessKey, number> = { base: 0, reference1: 0, reference2: 0 };
+  const totals = witnessKeys.map((key) => unitSets[key].length);
+  const total = Math.max(1, totals.reduce((sum, value) => sum + value, 0));
+  const masks: Array<{ mask: number; present: number }> = [
+    { mask: 0b111, present: 3 },
+    { mask: 0b110, present: 2 },
+    { mask: 0b101, present: 2 },
+    { mask: 0b011, present: 2 },
+    { mask: 0b100, present: 1 },
+    { mask: 0b010, present: 1 },
+    { mask: 0b001, present: 1 }
+  ];
 
-  while (leftIndex < leftUnits.length || rightIndex < rightUnits.length) {
-    const left = leftUnits[leftIndex];
-    const right = rightUnits[rightIndex];
+  while (witnessKeys.some((key) => indexes[key] < unitSets[key].length)) {
+    let best: { slots: WitnessSlots; score: number; present: number; mask: number } | undefined;
 
-    if (!left) {
-      rows.push(makeRow(undefined, right, rules, '自动补齐右侧新增内容'));
-      rightIndex += 1;
-    } else if (!right) {
-      rows.push(makeRow(left, undefined, rules, '自动标记左侧缺失内容'));
-      leftIndex += 1;
-    } else {
-      const sameParagraph =
-        left.paragraphOrder === right.paragraphOrder || Math.abs(left.paragraphOrder - right.paragraphOrder) <= 1;
-      const ratio = similarity(normalized(left.text, rules), normalized(right.text, rules));
-      const nextLeftRatio =
-        leftUnits[leftIndex + 1] && right
-          ? similarity(normalized(leftUnits[leftIndex + 1].text, rules), normalized(right.text, rules))
-          : 0;
-      const nextRightRatio =
-        rightUnits[rightIndex + 1] && left
-          ? similarity(normalized(left.text, rules), normalized(rightUnits[rightIndex + 1].text, rules))
-          : 0;
-
-      if (sameParagraph && (ratio >= 0.28 || (nextLeftRatio < 0.58 && nextRightRatio < 0.58))) {
-        const score = Number(ratio.toFixed(3));
-        rows.push({
-          id: `row-${rows.length + 1}-${left.id}-${right.id}`,
-          left,
-          right,
-          status: statusFor(left, right, score),
-          similarity: score,
-          note: '',
-          source: '',
-          accepted: score > 0.995,
-          manuallyAdjusted: false
-        });
-        leftIndex += 1;
-        rightIndex += 1;
-      } else if (nextRightRatio > ratio && nextRightRatio > nextLeftRatio) {
-        rows.push(makeRow(undefined, right, rules, '右侧有段落或句子插入'));
-        rightIndex += 1;
-      } else {
-        rows.push(makeRow(left, undefined, rules, '左侧有段落或句子缺失'));
-        leftIndex += 1;
+    for (const candidate of masks) {
+      const slots: WitnessSlots = {};
+      let available = 0;
+      witnessKeys.forEach((key, bitIndex) => {
+        const bit = 1 << (2 - bitIndex);
+        if (candidate.mask & bit) {
+          const unit = unitSets[key][indexes[key]];
+          if (!unit) return;
+          slots[key] = unit;
+          available += 1;
+        }
+      });
+      if (!available) continue;
+      const score = candidateScore(slots, rules);
+      if (!best || score > best.score || (score === best.score && candidate.present > best.present)) {
+        best = { slots, score, present: candidate.present, mask: candidate.mask };
       }
     }
 
+    if (!best) break;
+    const row = buildRow(best.slots, rules, versionIds);
+    row.id = `row-${rows.length + 1}-${witnessKeys
+      .map((key) => best?.slots[key]?.id ?? 'gap')
+      .join('-')}`;
+    rows.push(row);
+
+    witnessKeys.forEach((key, bitIndex) => {
+      const bit = 1 << (2 - bitIndex);
+      if (best?.mask & bit) indexes[key] += 1;
+    });
+
     if (rows.length % 24 === 0) {
-      onProgress(Math.round(((leftIndex + rightIndex) / Math.max(1, leftUnits.length + rightUnits.length)) * 100));
+      const consumed = witnessKeys.reduce((sum, key) => sum + indexes[key], 0);
+      onProgress(Math.round((consumed / total) * 100));
       await yieldToBrowser();
     }
   }
+
   onProgress(100);
   return rows;
-}
-
-function makeRow(
-  left: TextUnit | undefined,
-  right: TextUnit | undefined,
-  rules: ComparisonRules,
-  source: string
-): AlignmentRow {
-  const score = left && right ? Number(similarity(normalized(left.text, rules), normalized(right.text, rules)).toFixed(3)) : 0;
-  return {
-    id: `row-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-    left,
-    right,
-    status: statusFor(left, right, score),
-    similarity: score,
-    note: '',
-    source,
-    accepted: score > 0.995,
-    manuallyAdjusted: false
-  };
 }
 
 function defaultRules(): ComparisonRules {
@@ -172,8 +354,9 @@ function defaultRules(): ComparisonRules {
 
 export function useCollation() {
   const versions = ref<VersionDocument[]>(clone(sampleVersions));
-  const leftVersionId = ref(versions.value[0].id);
-  const rightVersionId = ref(versions.value[1].id);
+  const baseVersionId = ref(versions.value[0].id);
+  const reference1VersionId = ref(versions.value[1].id);
+  const reference2VersionId = ref(versions.value[2].id);
   const rows = ref<AlignmentRow[]>([]);
   const rules = ref<ComparisonRules>(defaultRules());
   const selectedRowId = ref('');
@@ -185,18 +368,21 @@ export function useCollation() {
   const future = ref<string[]>([]);
   const canUndo = computed(() => history.value.length > 0);
   const canRedo = computed(() => future.value.length > 0);
-  const leftVersion = computed(() => versions.value.find((item) => item.id === leftVersionId.value));
-  const rightVersion = computed(() => versions.value.find((item) => item.id === rightVersionId.value));
+  const baseVersion = computed(() => versions.value.find((item) => item.id === baseVersionId.value));
+  const reference1Version = computed(() => versions.value.find((item) => item.id === reference1VersionId.value));
+  const reference2Version = computed(() => versions.value.find((item) => item.id === reference2VersionId.value));
   const selectedRow = computed(() => rows.value.find((item) => item.id === selectedRowId.value));
   const differenceCount = computed(() => rows.value.filter((row) => row.status !== 'same').length);
   const acceptedCount = computed(() => rows.value.filter((row) => row.accepted).length);
-  const unresolvedCount = computed(() => rows.value.filter((row) => !row.accepted && row.status !== 'same').length);
+  const unresolvedCount = computed(() => rows.value.filter((row) => row.status !== 'same' && !row.accepted).length);
 
   function snapshot(): string {
     const data: PersistedCollationState = {
+      schemaVersion: 2,
       versions: versions.value,
-      leftVersionId: leftVersionId.value,
-      rightVersionId: rightVersionId.value,
+      baseVersionId: baseVersionId.value,
+      reference1VersionId: reference1VersionId.value,
+      reference2VersionId: reference2VersionId.value,
       rows: rows.value,
       rules: rules.value,
       selectedRowId: selectedRowId.value
@@ -219,9 +405,11 @@ export function useCollation() {
 
   function restore(raw: string) {
     const parsed = JSON.parse(raw) as PersistedCollationState;
+    if (parsed.schemaVersion !== 2) throw new Error('Unsupported collation state');
     versions.value = parsed.versions;
-    leftVersionId.value = parsed.leftVersionId;
-    rightVersionId.value = parsed.rightVersionId;
+    baseVersionId.value = parsed.baseVersionId;
+    reference1VersionId.value = parsed.reference1VersionId;
+    reference2VersionId.value = parsed.reference2VersionId;
     rows.value = parsed.rows;
     rules.value = parsed.rules;
     selectedRowId.value = parsed.selectedRowId;
@@ -245,15 +433,32 @@ export function useCollation() {
   }
 
   async function runAlignment(commitHistory = true) {
-    if (!leftVersion.value || !rightVersion.value || processing.value) return;
+    const ids = [baseVersionId.value, reference1VersionId.value, reference2VersionId.value];
+    if (new Set(ids).size !== 3 || versions.value.length < 3) {
+      message.value = '请分别选择底本、参校本一和参校本二，三份版本不能重复';
+      return false;
+    }
+    if (processing.value) return false;
+
     processing.value = true;
     progress.value = 0;
-    message.value = '正在分片执行自动对齐…';
+    message.value = '正在分片执行三本对对齐…';
     const previous = commitHistory ? snapshot() : '';
     try {
-      const result = await alignUnits(leftVersion.value.units, rightVersion.value.units, rules.value, (value) => {
-        progress.value = value;
-      });
+      const versionIdRecord = makeWitnessVersionIds(ids[0], ids[1], ids[2]);
+      const selectedVersions = witnessKeys.map((key) => versions.value.find((item) => item.id === versionIdRecord[key])!);
+      const result = await alignUnits(
+        versionIdRecord,
+        {
+          base: selectedVersions[0].units,
+          reference1: selectedVersions[1].units,
+          reference2: selectedVersions[2].units
+        },
+        rules.value,
+        (value) => {
+          progress.value = value;
+        }
+      );
       if (commitHistory) {
         history.value.push(previous);
         future.value = [];
@@ -261,22 +466,17 @@ export function useCollation() {
       rows.value = result;
       selectedRowId.value = result.find((row) => row.status !== 'same')?.id ?? result[0]?.id ?? '';
       selectedRowIds.value = [];
-      message.value = `自动对齐完成：${result.filter((row) => row.status !== 'same').length} 处差异`;
+      message.value = `三本对自动对齐完成：${result.filter((row) => row.status !== 'same').length} 处待校记录`;
       persist();
+      return true;
     } finally {
       processing.value = false;
     }
   }
 
   function recalculate() {
-    commit('已按比较规则重算差异', () => {
-      rows.value = rows.value.map((row) => {
-        if (!row.left || !row.right) return row;
-        const score = Number(
-          similarity(normalized(row.left.text, rules.value), normalized(row.right.text, rules.value)).toFixed(3)
-        );
-        return { ...row, similarity: score, status: statusFor(row.left, row.right, score) };
-      });
+    commit('已按比较规则重算三本异文', () => {
+      rows.value = rows.value.map((row) => analyzeRow({ ...row }, rules.value));
       selectedRowIds.value = [];
     });
   }
@@ -284,37 +484,58 @@ export function useCollation() {
   function updateRow(id: string, patch: Partial<AlignmentRow>) {
     commit('已更新校勘行', () => {
       const row = rows.value.find((item) => item.id === id);
-      if (row) Object.assign(row, patch, { manuallyAdjusted: true });
-    });
-  }
-
-  function shiftPairing(id: string, direction: -1 | 1) {
-    commit(direction < 0 ? '已向前调整错位' : '已向后调整错位', () => {
-      const index = rows.value.findIndex((row) => row.id === id);
-      const targetIndex = index + direction;
-      if (index < 0 || targetIndex < 0 || targetIndex >= rows.value.length) return;
-      const current = rows.value[index];
-      const target = rows.value[targetIndex];
-      const currentLeft = current.left;
-      current.left = target.left;
-      target.left = currentLeft;
-      for (const row of [current, target]) {
-        if (row.left && row.right) {
-          row.similarity = Number(
-            similarity(normalized(row.left.text, rules.value), normalized(row.right.text, rules.value)).toFixed(3)
-          );
-          row.status = statusFor(row.left, row.right, row.similarity);
-        } else {
-          row.status = row.left ? 'removed' : 'added';
-          row.similarity = 0;
-        }
+      if (!row) return;
+      Object.assign(row, patch);
+      if ('status' in patch || 'adoptedVersionId' in patch || 'manualConfirmed' in patch) {
         row.manuallyAdjusted = true;
       }
     });
   }
 
+  function setStatus(id: string, status: DifferenceStatus) {
+    updateRow(id, { status, accepted: false, manualConfirmed: false });
+  }
+
+  function adoptReading(id: string, versionId: string) {
+    updateRow(id, { adoptedVersionId: versionId, accepted: false });
+  }
+
+  function setManualConfirmed(id: string, value: boolean) {
+    updateRow(id, value ? { manualConfirmed: true, accepted: false } : { manualConfirmed: false });
+  }
+
+  function canAcceptRow(row: AlignmentRow) {
+    const needsReview = readingRequiresReview(
+      row.readingPattern,
+      row.status,
+      row.adoptedVersionId,
+      row.singletonVersionId
+    );
+    return Boolean(row.adoptedVersionId) && (!needsReview || row.manualConfirmed);
+  }
+
+  function refreshWitnessPair(row: AlignmentRow) {
+    const refreshed = analyzeRow({ ...row, manualConfirmed: false, accepted: false }, rules.value);
+    Object.assign(row, refreshed, { manuallyAdjusted: true });
+  }
+
+  function shiftWitness(id: string, witnessKey: WitnessKey, direction: -1 | 1) {
+    commit(direction < 0 ? '已向前调整该版本配对' : '已向后调整该版本配对', () => {
+      const index = rows.value.findIndex((row) => row.id === id);
+      const targetIndex = index + direction;
+      if (index < 0 || targetIndex < 0 || targetIndex >= rows.value.length) return;
+      const current = rows.value[index];
+      const target = rows.value[targetIndex];
+      const currentUnit = current[witnessKey];
+      current[witnessKey] = target[witnessKey];
+      target[witnessKey] = currentUnit;
+      refreshWitnessPair(current);
+      refreshWitnessPair(target);
+    });
+  }
+
   function moveRow(id: string, direction: -1 | 1) {
-    commit('已移动校勘顺序', () => {
+    commit('已移动三条对齐记录顺序', () => {
       const index = rows.value.findIndex((row) => row.id === id);
       const targetIndex = index + direction;
       if (index < 0 || targetIndex < 0 || targetIndex >= rows.value.length) return;
@@ -325,23 +546,39 @@ export function useCollation() {
   }
 
   function acceptRows(ids: string[]) {
-    if (!ids.length) return;
-    commit(`已接受 ${ids.length} 条校对建议`, () => {
-      const selected = new Set(ids);
-      rows.value.forEach((row) => {
-        if (selected.has(row.id)) row.accepted = true;
-      });
-      selectedRowIds.value = [];
-    });
-  }
-
-  function acceptAll() {
-    commit('已批量接受全部差异建议', () => {
-      rows.value.forEach((row) => {
+    const selected = new Set(ids);
+    const targets = rows.value.filter((row) => selected.has(row.id));
+    const acceptable = targets.filter(canAcceptRow);
+    const blocked = targets.length - acceptable.length;
+    if (!acceptable.length) {
+      message.value = '所选记录仍需指定定本并完成人工确认';
+      return { accepted: 0, blocked };
+    }
+    commit(`已接受 ${acceptable.length} 条三本对校记录`, () => {
+      acceptable.forEach((row) => {
         row.accepted = true;
       });
       selectedRowIds.value = [];
     });
+    if (blocked) message.value = `已接受 ${acceptable.length} 条；${blocked} 条孤证、缺句或疑错位仍需人工确认`;
+    return { accepted: acceptable.length, blocked };
+  }
+
+  function acceptAll() {
+    const acceptable = rows.value.filter(canAcceptRow);
+    const blocked = rows.value.length - acceptable.length;
+    if (!acceptable.length) {
+      message.value = '没有可直接接受的记录；孤证、缺句和三家分歧需人工确认';
+      return { accepted: 0, blocked };
+    }
+    commit(`已批量接受 ${acceptable.length} 条校勘记录`, () => {
+      acceptable.forEach((row) => {
+        row.accepted = true;
+      });
+      selectedRowIds.value = [];
+    });
+    if (blocked) message.value = `已接受 ${acceptable.length} 条；${blocked} 条仍需人工确认`;
+    return { accepted: acceptable.length, blocked };
   }
 
   function nextDifference() {
@@ -351,12 +588,12 @@ export function useCollation() {
       const row = rows.value[index];
       if (row && row.status !== 'same' && !row.accepted) {
         selectedRowId.value = row.id;
-        message.value = `已跳到第 ${index + 1} 条未接受差异`;
+        message.value = `已跳到第 ${index + 1} 条待校记录`;
         persist();
         return;
       }
     }
-    message.value = '没有更多未接受的差异';
+    message.value = '没有更多未接受的异文或缺句';
   }
 
   function addVersion(name: string, source: string, text: string) {
@@ -372,40 +609,81 @@ export function useCollation() {
     commit(`已导入版本：${item.name}`, () => {
       versions.value.push(item);
     });
-    rightVersionId.value = id;
+    reference2VersionId.value = id;
     void runAlignment();
   }
 
+  function cell(value?: string) {
+    return (value ?? '—').replaceAll('|', '\\|').replaceAll('\n', ' ');
+  }
+
+  function namesOf(ids: string[]) {
+    return ids.length ? ids.map((id) => versionName(versions.value, id)).join('、') : '—';
+  }
+
+  function evidenceSummary(row: AlignmentRow) {
+    if (row.readingPattern === 'unanimous') return `三家一致：${namesOf(row.agreementVersionIds)}`;
+    if (row.readingPattern === 'majority') return `两家一致：${namesOf(row.agreementVersionIds)}`;
+    if (row.readingPattern === 'divergent') return '三家异文';
+    if (row.missingVersionIds.length) return `缺句：${namesOf(row.missingVersionIds)}`;
+    return '依据不完整';
+  }
+
   function exportMarkdown() {
-    const changed = rows.value.filter((row) => row.status !== 'same' || row.note || row.source);
+    const changed = rows.value.filter((row) => row.status !== 'same' || row.note || row.source || !row.accepted);
+    const witnessMeta = [
+      ['底本', baseVersion.value],
+      ['参校本一', reference1Version.value],
+      ['参校本二', reference2Version.value]
+    ] as const;
     const lines = [
-      '# 校勘记',
+      '# 三本对校勘记',
       '',
-      `- 底本：${leftVersion.value?.name ?? '未选择'}`,
-      `- 参校本：${rightVersion.value?.name ?? '未选择'}`,
-      `- 比较规则：${rules.value.ignorePunctuation ? '忽略标点；' : ''}${rules.value.ignoreVariants ? '忽略异体字；' : ''}保留正文。`,
+      ...witnessMeta.map(([role, version]) => `- ${role}：${version?.name ?? '未选择'}（${version?.source ?? '未注明来源'}）`),
+      `- 比较规则：${rules.value.ignorePunctuation ? '忽略标点；' : '保留标点；'}${rules.value.ignoreVariants ? '忽略常见异体字；' : '不忽略异体字；'}三份原文均不改写。`,
+      `- 人工调序：${rows.value.filter((row) => row.manuallyAdjusted).length} 条；待人工确认：${rows.value.filter((row) => !row.accepted && row.status !== 'same').length} 条。`,
       `- 导出时间：${new Date().toLocaleString('zh-CN')}`,
       '',
-      '| 序 | 类别 | 底本 | 参校本 | 校记 | 来源 | 状态 |',
-      '|---|---|---|---|---|---|---|'
+      '| 序 | 判定 | 三份依据 | 底本原文 | 参校本一原文 | 参校本二原文 | 多数/孤证 | 定本采用 | 人工确认 | 接受状态 | 人工调序 | 校记 | 校记来源 |',
+      '|---|---|---|---|---|---|---|---|---|---|---|---|---|'
     ];
     changed.forEach((row, index) => {
-      const cell = (value?: string) => (value ?? '').replaceAll('|', '\\|').replaceAll('\n', ' ');
       lines.push(
-        `| ${index + 1} | ${statusLabel(row.status)} | ${cell(row.left?.text)} | ${cell(row.right?.text)} | ${cell(row.note)} | ${cell(row.source)} | ${row.accepted ? '已接受' : '待处理'} |`
+        `| ${index + 1} | ${statusLabel(row.status)} | ${evidenceSummary(row)} | ${cell(row.base?.text)} | ${cell(row.reference1?.text)} | ${cell(row.reference2?.text)} | ${
+          row.singletonVersionId ? `孤证：${versionName(versions.value, row.singletonVersionId)}` : namesOf(row.agreementVersionIds)
+        } | ${cell(versionName(versions.value, row.adoptedVersionId))} | ${row.manualConfirmed ? '已确认' : '待确认'} | ${row.accepted ? '已接受' : '待处理'} | ${row.manuallyAdjusted ? '是' : '否'} | ${cell(row.note)} | ${cell(row.source)} |`
       );
     });
-    lines.push('', `共 ${changed.length} 条校勘记录。`);
+    lines.push('', `共 ${changed.length} 条校勘记录，每条均保留底本与两份参校本依据。`);
     return lines.join('\n');
   }
 
   function exportJson() {
     return JSON.stringify(
       {
-        left: leftVersion.value,
-        right: rightVersion.value,
+        schemaVersion: 2,
+        witnesses: {
+          base: baseVersion.value,
+          reference1: reference1Version.value,
+          reference2: reference2Version.value
+        },
         rules: rules.value,
-        rows: rows.value,
+        rows: rows.value.map((row) => ({
+          ...row,
+          evidence: {
+            base: { versionId: row.witnessVersionIds.base, unit: row.base },
+            reference1: { versionId: row.witnessVersionIds.reference1, unit: row.reference1 },
+            reference2: { versionId: row.witnessVersionIds.reference2, unit: row.reference2 },
+            readingPattern: row.readingPattern,
+            agreementVersionIds: row.agreementVersionIds,
+            singletonVersionId: row.singletonVersionId,
+            missingVersionIds: row.missingVersionIds,
+            adoptedVersionId: row.adoptedVersionId,
+            manualConfirmed: row.manualConfirmed,
+            manuallyAdjusted: row.manuallyAdjusted,
+            accepted: row.accepted
+          }
+        })),
         exportedAt: new Date().toISOString()
       },
       null,
@@ -418,19 +696,25 @@ export function useCollation() {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         restore(raw);
-        message.value = '已恢复浏览器中的校勘草稿';
+        message.value = '已恢复浏览器中的三本对校勘草稿';
       } else {
-        message.value = '已载入示例版本，正在自动对齐…';
+        message.value = '已载入三份示例版本，正在自动对齐…';
         void runAlignment(false);
       }
     } catch {
-      message.value = '本地草稿读取失败，已载入示例数据';
+      message.value = '本地草稿读取失败，已载入三份示例数据';
       void runAlignment(false);
     }
   });
 
   watch(
-    [leftVersionId, rightVersionId, () => rules.value.ignorePunctuation, () => rules.value.ignoreVariants],
+    [
+      baseVersionId,
+      reference1VersionId,
+      reference2VersionId,
+      () => rules.value.ignorePunctuation,
+      () => rules.value.ignoreVariants
+    ],
     () => {
       if (!processing.value) persist();
     }
@@ -438,8 +722,9 @@ export function useCollation() {
 
   return {
     versions,
-    leftVersionId,
-    rightVersionId,
+    baseVersionId,
+    reference1VersionId,
+    reference2VersionId,
     rows,
     rules,
     selectedRowId,
@@ -451,8 +736,9 @@ export function useCollation() {
     future,
     canUndo,
     canRedo,
-    leftVersion,
-    rightVersion,
+    baseVersion,
+    reference1Version,
+    reference2Version,
     selectedRow,
     differenceCount,
     acceptedCount,
@@ -460,7 +746,11 @@ export function useCollation() {
     runAlignment,
     recalculate,
     updateRow,
-    shiftPairing,
+    setStatus,
+    adoptReading,
+    setManualConfirmed,
+    canAcceptRow,
+    shiftWitness,
     moveRow,
     acceptRows,
     acceptAll,
@@ -476,10 +766,18 @@ export function useCollation() {
 
 export function statusLabel(status: DifferenceStatus) {
   return {
-    same: '相同',
-    changed: '改动',
-    added: '右侧新增',
-    removed: '左侧删减',
+    same: '三家相同',
+    changed: '异文',
+    missing: '缺句',
     misaligned: '疑错位'
   }[status];
+}
+
+export function readingPatternLabel(pattern: ReadingPattern) {
+  return {
+    unanimous: '三家一致',
+    majority: '两家一致',
+    divergent: '三家分歧',
+    incomplete: '缺句/孤本'
+  }[pattern];
 }

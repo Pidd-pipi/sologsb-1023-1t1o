@@ -44,6 +44,17 @@ textarea {
   backdrop-filter: blur(16px);
 }
 
+.topbar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.top-actions {
+  margin-left: auto;
+}
+
 .brand-mark {
   display: grid;
   width: 40px;
@@ -110,12 +121,38 @@ textarea {
   text-transform: uppercase;
 }
 
+.version-select-grid,
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.version-select-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.hint-text,
+.paragraph-label {
+  color: #86909c;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.shortcut-list {
+  color: #4e5969;
+  font-size: 12px;
+  line-height: 2;
+}
+
 .diff-text {
   min-height: 44px;
   padding: 7px 9px;
   border-radius: 6px;
   font-family: "Songti SC", "Noto Serif SC", serif;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.7;
   white-space: pre-wrap;
 }
@@ -130,30 +167,123 @@ textarea {
   background: #fff7e8;
 }
 
-.diff-text.added {
-  color: #0f7b45;
-  background: #e8ffea;
+.diff-text.singleton,
+.diff-text.changed.singleton {
+  color: #a8071a;
+  background: #fff1f0;
+  box-shadow: inset 3px 0 0 #f53f3f;
 }
 
-.diff-text.removed {
-  color: #a8071a;
-  background: #ffece8;
-  text-decoration: line-through;
-  text-decoration-thickness: 1px;
+.diff-text.missing-panel {
+  color: #86909c;
+  background: #f7f8fa;
+}
+
+.witness-cell {
+  display: grid;
+  gap: 5px;
 }
 
 .paragraph-label {
-  margin-bottom: 4px;
+  margin-bottom: 0;
+}
+
+.mini-metric {
+  margin-top: 5px;
   color: #86909c;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.cell-badges,
+.cell-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.cell-actions .arco-btn {
+  padding: 0 6px;
   font-size: 11px;
 }
 
-.row-active {
+.missing-text {
+  display: grid;
+  min-height: 82px;
+  padding: 12px 8px;
+  place-items: center;
+  gap: 5px;
+  color: #cb2634;
+  font-size: 12px;
+  text-align: center;
+  border: 1px dashed #f7a9b0;
+  border-radius: 8px;
+  background: #fff7f8;
+}
+
+.missing-text strong {
+  font-size: 14px;
+}
+
+.row-active td {
   background: #e8f3ff !important;
+}
+
+.row-needs-review td:first-child {
+  box-shadow: inset 3px 0 0 #f53f3f;
 }
 
 .virtual-table .arco-table-td {
   vertical-align: top;
+}
+
+.consensus-box,
+.adoption-cell,
+.note-cell {
+  display: grid;
+  gap: 7px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #4e5969;
+}
+
+.evidence-label {
+  color: #1d2129;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.evidence-label.danger {
+  color: #cb2634;
+}
+
+.evidence-name,
+.adopted-name,
+.singleton-box,
+.missing-list {
+  color: #4e5969;
+  font-size: 12px;
+}
+
+.singleton-box {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.adoption-cell .arco-radio-group {
+  gap: 4px;
+}
+
+.note-source {
+  color: #86909c;
+}
+
+.inspector-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .inspector-empty {
@@ -164,13 +294,68 @@ textarea {
   text-align: center;
 }
 
-.status-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-right: 6px;
-  border-radius: 50%;
-  background: currentColor;
+.empty-mark {
+  margin-bottom: 8px;
+  font-size: 30px;
+  color: #c9cdd4;
+}
+
+.detail-label {
+  margin-bottom: 10px;
+  color: #86909c;
+  font-size: 12px;
+}
+
+.witness-detail {
+  padding: 10px;
+  margin-bottom: 8px;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.witness-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+  color: #1d2129;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.radio-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.adoption-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #4e5969;
+  font-size: 13px;
+}
+
+.adoption-option input {
+  margin: 0;
+}
+
+.adopted-preview {
+  padding: 9px;
+  margin-top: 10px;
+  border-radius: 6px;
+  color: #4e5969;
+  font-size: 13px;
+  line-height: 1.6;
+  background: #f7f8fa;
+}
+
+.manual-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .stats-grid {
@@ -191,6 +376,14 @@ textarea {
   font-size: 22px;
   font-weight: 650;
   line-height: 1.2;
+}
+
+.stat-warning {
+  color: #d25f00;
+}
+
+.stat-success {
+  color: #00875a;
 }
 
 .stat-label {
@@ -224,5 +417,12 @@ textarea {
 
   .center-panel {
     padding: 10px;
+  }
+
+  .topbar-row,
+  .top-actions {
+    align-items: flex-start;
+    flex-direction: column;
+    margin-left: 0;
   }
 }
